@@ -53,6 +53,7 @@ class LaneFilterHistogram():
     range_min: float
     range_est: float
     range_max: float
+    lane_side: str
 
     def __init__(self, encoder_resolution, wheel_baseline, wheel_radius, **kwargs):
         self.encoder_resolution = encoder_resolution
@@ -80,6 +81,7 @@ class LaneFilterHistogram():
             "range_min",
             "range_est",
             "range_max",
+            "lane_side",
         ]
 
         for p_name in param_names:
@@ -119,6 +121,17 @@ class LaneFilterHistogram():
         self.belief = self.belief/np.sum(self.belief)
 
         self.initialized = True
+
+    def set_lane_side(self, side: str):
+        """Switch lane side at runtime and reset the belief.
+
+        Args:
+            side: "left" or "right"
+        """
+        if side not in ("left", "right"):
+            return
+        self.lane_side = side
+        self.initialize_belief()
 
     def getStatus(self):
         return LaneFilterInterface.GOOD
@@ -253,6 +266,13 @@ class LaneFilterHistogram():
     def generateVote(self, segment):
         p1 = np.array([segment.points[0].x, segment.points[0].y])
         p2 = np.array([segment.points[1].x, segment.points[1].y])
+
+        # Mirror lateral axis for left-lane following so the right-lane
+        # vote geometry below applies unchanged.
+        if self.lane_side == "left":
+            p1 = np.array([p1[0], -p1[1]])
+            p2 = np.array([p2[0], -p2[1]])
+
         t_hat = (p2 - p1) / np.linalg.norm(p2 - p1)
 
         n_hat = np.array([-t_hat[1], t_hat[0]])

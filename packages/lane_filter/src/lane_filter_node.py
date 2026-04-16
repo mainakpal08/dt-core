@@ -15,6 +15,7 @@ from duckietown.dtros import DTROS, NodeType, TopicType
 from duckietown_msgs.msg import LanePose, SegmentList, WheelEncoderStamped, EpisodeStart
 from duckietown_msgs.msg import Segment as SegmentMsg
 from sensor_msgs.msg import CompressedImage
+from std_msgs.msg import String
 
 
 
@@ -78,6 +79,9 @@ class LaneFilterNode(DTROS):
             rospy.logerror(f"[Lane filter] Unable to load required param: {e}")
 
         # Create the filter
+        # lane_side is handled by this node (not part of the installed LaneFilterHistogram).
+        # Pop it before instantiation to avoid the unexpected keyword argument error.
+        self.lane_side = self._filter.pop("lane_side", "right")
         self.filter = LaneFilterHistogram(**self._filter)
 
 
@@ -103,6 +107,10 @@ class LaneFilterNode(DTROS):
             "~right_wheel_encoder_driver_node/tick", WheelEncoderStamped, self.cbProcessRightEncoder, queue_size=1
         )
 
+        self.sub_set_lane_side = rospy.Subscriber(
+            "~set_lane_side", String, self.cbSetLaneSide, queue_size=1
+        )
+
 
         # Publishers
         self.pub_lane_pose = rospy.Publisher(
@@ -126,7 +134,16 @@ class LaneFilterNode(DTROS):
 
     def cbEpisodeStart(self, msg):
         rospy.loginfo("Lane Filter Resetting")
-        self.filter.initialize_belief()
+        self.filter.initialize()
+
+    def cbSetLaneSide(self, msg):
+        side = msg.data.strip().lower()
+        if side not in ("left", "right"):
+            rospy.logwarn(f"[lane_filter] Invalid lane_side '{side}', expected 'left' or 'right'")
+            return
+        rospy.loginfo(f"[lane_filter] Switching lane side to '{side}'")
+        self.lane_side = side
+        self.filter.initialize()
 
     @staticmethod
     def _seg_msg_to_custom_type(msg: SegmentMsg):
@@ -163,7 +180,12 @@ class LaneFilterNode(DTROS):
     def cbPredict(self):
         if self.left_encoder_ticks_delta == 0 or self.right_encoder_ticks_delta == 0:
             return
-        self.filter.predict(self.left_encoder_ticks_delta, self.right_encoder_ticks_delta)
+        # Swap encoder ticks for left-lane driving so that the turning
+        # direction in the prediction matches the y-mirrored visual segments.
+        if self.lane_side == "left":
+            self.filter.predict(self.right_encoder_ticks_delta, self.left_encoder_ticks_delta)
+        else:
+            self.filter.predict(self.left_encoder_ticks_delta, self.right_encoder_ticks_delta)
         self.left_encoder_ticks += self.left_encoder_ticks_delta
         self.right_encoder_ticks += self.right_encoder_ticks_delta
         self.left_encoder_ticks_delta = 0
@@ -193,7 +215,12 @@ class LaneFilterNode(DTROS):
 
             dt_points = []
             for point in segment.points:
-                dt_point = SegmentPoint(x=point.x, y=point.y)
+                # Mirror the lateral (y) axis for left-lane following so the
+                # installed filter's right-lane vote geometry applies unchanged.
+                if self.lane_side == "left":
+                    dt_point = SegmentPoint(x=point.x, y=-point.y)
+                else:
+                    dt_point = SegmentPoint(x=point.x, y=point.y)
                 dt_points.append(dt_point)
 
             dt_segment = Segment(points=dt_points, color=dt_segment_color)
@@ -216,8 +243,8 @@ class LaneFilterNode(DTROS):
         # build lane pose message to send
         lanePose = LanePose()
         lanePose.header = header
-        lanePose.d = d_max
-        lanePose.phi = phi_max
+        lanePose.d = -d_max if self.lane_side == "left" else d_max
+        lanePose.phi = -phi_max if self.lane_side == "left" else phi_max
         lanePose.in_lane = in_lane
         # XXX: is it always NORMAL?
         lanePose.status = lanePose.NORMAL
